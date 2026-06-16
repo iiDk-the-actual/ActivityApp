@@ -4,11 +4,26 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Windows.Media.Control;
+using System.Runtime.InteropServices.WindowsRuntime;
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
-var appDir   = AppContext.BaseDirectory;
-var cfgPath  = Path.Combine(appDir, "config.json");
+var appDir  = AppContext.BaseDirectory;
+var cfgPath = FindConfig(appDir);
+
+static string FindConfig(string start)
+{
+    var dir = start;
+    for (int i = 0; i < 6; i++)
+    {
+        var p = Path.Combine(dir, "config.json");
+        if (File.Exists(p)) return p;
+        var parent = Directory.GetParent(dir)?.FullName;
+        if (parent is null) break;
+        dir = parent;
+    }
+    throw new FileNotFoundException("config.json not found — copy config.example.json to config.json and fill it in.");
+}
 var cfgNode  = JsonNode.Parse(await File.ReadAllTextAsync(cfgPath))!;
 
 var PAT           = cfgNode["pat"]!.GetValue<string>();
@@ -26,6 +41,7 @@ http.DefaultRequestHeaders.Accept.ParseAdd("application/vnd.github.v3+json");
 // ── State ─────────────────────────────────────────────────────────────────────
 
 string?  lastSongKey      = null;
+bool     wasPlaying       = false;
 DateTime lastOnlinePush   = DateTime.MinValue;
 DateTime lastUpdateCheck  = DateTime.MinValue;
 var      shaCache         = new Dictionary<string, string>();
@@ -77,13 +93,38 @@ async Task CheckSong()
     try
     {
         var session = await GetSpotifySession();
-        if (session is null) return;
+        var playing = session is not null &&
+                      session.GetPlaybackInfo().PlaybackStatus ==
+                      GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing;
 
-        var status = session.GetPlaybackInfo().PlaybackStatus;
-        if (status is not GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing)
+        if (!playing)
+        {
+            if (wasPlaying)
+            {
+                wasPlaying  = false;
+                lastSongKey = null;
+
+                var stoppedJson = JsonSerializer.Serialize(new
+                {
+                    title     = "",
+                    artist    = "",
+                    status    = "Stopped",
+                    elapsed   = 0,
+                    duration  = 0,
+                    timestamp = DateTime.UtcNow.ToString("o"),
+                    app       = "Spotify",
+                },
+                new JsonSerializerOptions { WriteIndented = true });
+
+                var ok = await GhPush("song.json", stoppedJson, "song: stopped");
+                Console.WriteLine($"[song] {(ok ? "ok" : "FAIL")}: stopped");
+            }
             return;
+        }
 
-        var props    = await session.TryGetMediaPropertiesAsync();
+        wasPlaying = true;
+
+        var props    = await session!.TryGetMediaPropertiesAsync();
         var timeline = session.GetTimelineProperties();
 
         var title   = props.Title  ?? "";
@@ -93,22 +134,31 @@ async Task CheckSong()
         if (songKey == lastSongKey) return;
         lastSongKey = songKey;
 
+        string? iconBase64 = null;
+        if (props.Thumbnail is not null)
+        {
+            using var stream = await props.Thumbnail.OpenReadAsync();
+            using var ms     = new MemoryStream();
+            await stream.AsStreamForRead().CopyToAsync(ms);
+            iconBase64 = Convert.ToBase64String(ms.ToArray());
+        }
+
         var songJson = JsonSerializer.Serialize(new
         {
             title,
             artist,
-            status   = "Playing",
-            elapsed  = timeline.Position.TotalSeconds,
-            duration = timeline.EndTime.TotalSeconds,
+            status    = "Playing",
+            elapsed   = timeline.Position.TotalSeconds,
+            duration  = timeline.EndTime.TotalSeconds,
             timestamp = DateTime.UtcNow.ToString("o"),
-            app      = "Spotify",
+            app       = "Spotify",
+            icon      = iconBase64,
         },
         new JsonSerializerOptions { WriteIndented = true });
 
-        var ok = await GhPush("song.json", songJson, $"song: {title} - {artist}");
-        Console.WriteLine($"[song] {(ok ? "ok" : "FAIL")}: {title} - {artist}");
+        var ok2 = await GhPush("song.json", songJson, $"song: {title} - {artist}");
+        Console.WriteLine($"[song] {(ok2 ? "ok" : "FAIL")}: {title} - {artist}");
 
-        // Online heartbeat on every song change too
         await PushOnline();
     }
     catch (Exception ex)
