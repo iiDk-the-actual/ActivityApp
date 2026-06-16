@@ -28,7 +28,8 @@ var cfgNode  = JsonNode.Parse(await File.ReadAllTextAsync(cfgPath))!;
 
 var PAT           = cfgNode["pat"]!.GetValue<string>();
 var ACTIVITY_REPO = cfgNode["activity_repo"]?.GetValue<string>() ?? "iiDk-the-actual/Activity";
-var APP_DIR_SRC   = cfgNode["source_dir"]?.GetValue<string>()    // path to the cloned source repo
+var APP_REPO      = cfgNode["app_repo"]?.GetValue<string>()      ?? "iiDk-the-actual/ActivityApp";
+var APP_DIR_SRC   = cfgNode["source_dir"]?.GetValue<string>()
                     ?? Path.GetFullPath(Path.Combine(appDir, "..", "..", "..", ".."));
 
 // ── HTTP client ───────────────────────────────────────────────────────────────
@@ -231,17 +232,22 @@ async Task CheckUpdate()
 {
     try
     {
-        var local  = Git("rev-parse HEAD",          APP_DIR_SRC).Trim();
-        Git("fetch origin --quiet",                  APP_DIR_SRC);
-        var remote = Git("rev-parse origin/main",    APP_DIR_SRC).Trim();
+        // Use GitHub API to get latest commit SHA — no git auth needed for public repo
+        var apiResp = await http.GetAsync($"https://api.github.com/repos/{APP_REPO}/commits/main");
+        if (!apiResp.IsSuccessStatusCode) return;
 
-        if (string.IsNullOrEmpty(local) || string.IsNullOrEmpty(remote) || local == remote)
+        var apiJson  = JsonNode.Parse(await apiResp.Content.ReadAsStringAsync());
+        var remote   = apiJson?["sha"]?.GetValue<string>()?.Trim();
+        var local    = Git("rev-parse HEAD").Trim();
+
+        if (string.IsNullOrEmpty(remote) || string.IsNullOrEmpty(local) || local == remote)
             return;
 
         Console.WriteLine($"[update] {local[..7]} -> {remote[..7]}");
-        Git("pull origin main --quiet", APP_DIR_SRC);
 
-        // run.bat loop will rebuild + relaunch on exit
+        var result = Git($"pull https://github.com/{APP_REPO}.git main --quiet");
+        Console.WriteLine($"[update] pull: {result.Trim()}");
+
         Console.WriteLine("[update] Restarting...");
         Environment.Exit(0);
     }
