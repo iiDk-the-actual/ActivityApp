@@ -45,7 +45,6 @@ string?  lastSongKey      = null;
 bool     wasPlaying       = false;
 DateTime lastOnlinePush   = DateTime.MinValue;
 DateTime lastUpdateCheck  = DateTime.MinValue;
-var      shaCache         = new Dictionary<string, string>();
 
 Console.WriteLine("[ActivityApp] Running.");
 await PushOnline();
@@ -190,17 +189,14 @@ async Task PushOnline()
 
 async Task<bool> GhPush(string path, string content, string message)
 {
-    var url      = $"https://api.github.com/repos/{ACTIVITY_REPO}/contents/{path}";
-    var cacheKey = $"{ACTIVITY_REPO}/{path}";
+    var url = $"https://api.github.com/repos/{ACTIVITY_REPO}/contents/{path}";
 
-    if (!shaCache.TryGetValue(cacheKey, out var sha))
+    string? sha = null;
+    var get = await http.GetAsync(url);
+    if (get.IsSuccessStatusCode)
     {
-        var get = await http.GetAsync(url);
-        if (get.IsSuccessStatusCode)
-        {
-            var node = JsonNode.Parse(await get.Content.ReadAsStringAsync());
-            sha = node?["sha"]?.GetValue<string>();
-        }
+        var node = JsonNode.Parse(await get.Content.ReadAsStringAsync());
+        sha = node?["sha"]?.GetValue<string>();
     }
 
     var payload = new JsonObject
@@ -213,13 +209,7 @@ async Task<bool> GhPush(string path, string content, string message)
     var resp = await http.PutAsync(url,
         new StringContent(payload.ToJsonString(), Encoding.UTF8, "application/json"));
 
-    if (resp.IsSuccessStatusCode)
-    {
-        var node   = JsonNode.Parse(await resp.Content.ReadAsStringAsync());
-        var newSha = node?["content"]?["sha"]?.GetValue<string>();
-        if (newSha is not null) shaCache[cacheKey] = newSha;
-        return true;
-    }
+    if (resp.IsSuccessStatusCode) return true;
 
     var err = await resp.Content.ReadAsStringAsync();
     Console.WriteLine($"[gh] {resp.StatusCode}: {err[..Math.Min(err.Length, 120)]}");
